@@ -209,6 +209,10 @@ class ScopeWindow(QMainWindow):
         self._controls.trigger_channel_changed.connect(self._on_trigger_channel_changed)
         self._controls.trigger_enabled_changed.connect(self._on_trigger_enabled_changed)
 
+        # Align trigger marker visibility and internal state to the controls' initial setting
+        # so the UI doesn't start waiting for a trigger so user gets immediate display of readings.
+        self._on_trigger_enabled_changed(self._controls.is_trigger_enabled())
+
     def _setup_plot(self):
         self._plot_widget.setBackground("#000000")
         pi = self._plot_widget.getPlotItem()

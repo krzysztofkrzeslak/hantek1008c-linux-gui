@@ -89,7 +89,8 @@ class ControlsPanel(QWidget):
         self._active = {i: (i == 0) for i in range(8)}
         self._vscales = {i: 1.0 for i in range(8)}
         self._trigger_ch = 0
-        self._trigger_enabled = True
+        # Start the app in free-run by default so the display shows immediately, instead of waiting for a hardware trigger event.
+        self._trigger_enabled = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 10, 8, 8)
@@ -128,6 +129,7 @@ class ControlsPanel(QWidget):
             layout.addWidget(self._make_channel_row(i))
 
         layout.addStretch()
+        self._update_trig_btn_styles()
 
     def _make_channel_row(self, ch_idx):
         color = CHANNEL_COLORS[ch_idx]
