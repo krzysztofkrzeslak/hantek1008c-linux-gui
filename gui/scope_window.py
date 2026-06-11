@@ -5,6 +5,7 @@ import pyqtgraph as pg
 
 log = logging.getLogger(__name__)
 from PyQt6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QApplication
+from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 
 from gui.controls import ControlsPanel, CHANNEL_COLORS
@@ -108,6 +109,35 @@ def _yrange_for(vscales):
     return max(vscales) * (VOLT_DIVS / 2) if vscales else 4.0
 
 
+class TimeAxisItem(pg.AxisItem):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._ns_per_div = 0
+        self._samples_per_div = 1
+
+    def set_timebase(self, ns_per_div: int, samples_per_div: float):
+        self._ns_per_div = ns_per_div
+        self._samples_per_div = max(samples_per_div, 1.0)
+
+    def tickStrings(self, values, scale, spacing):
+        if self._samples_per_div <= 0:
+            return super().tickStrings(values, scale, spacing)
+        ns_per_sample = self._ns_per_div / self._samples_per_div
+        labels = []
+        for value in values:
+            time_ns = value * ns_per_sample
+            labels.append(self._format_time(time_ns))
+        return labels
+
+    @staticmethod
+    def _format_time(ns: float) -> str:
+        if ns >= 1_000_000:
+            return f"{ns / 1_000_000:.3g}ms"
+        if ns >= 1_000:
+            return f"{ns / 1_000:.3g}µs"
+        return f"{ns:.0f}ns"
+
+
 class ScopeWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -139,7 +169,8 @@ class ScopeWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self._plot_widget = pg.PlotWidget()
+        self._time_axis = TimeAxisItem(orientation='bottom')
+        self._plot_widget = pg.PlotWidget(axisItems={'bottom': self._time_axis})
 
         self._ch_margin = ChannelMarginWidget(self._plot_widget)
         self._ch_margin.channel_dragged.connect(self._on_channel_dragged)
@@ -178,11 +209,28 @@ class ScopeWindow(QMainWindow):
         self._controls.trigger_channel_changed.connect(self._on_trigger_channel_changed)
         self._controls.trigger_enabled_changed.connect(self._on_trigger_enabled_changed)
 
+        # Align trigger marker visibility and internal state to the controls' initial setting
+        # so the UI doesn't start waiting for a trigger so user gets immediate display of readings.
+        self._on_trigger_enabled_changed(self._controls.is_trigger_enabled())
+
     def _setup_plot(self):
         self._plot_widget.setBackground("#000000")
         pi = self._plot_widget.getPlotItem()
-        pi.hideAxis("left")
-        pi.hideAxis("bottom")
+        pi.showAxis("left")
+        pi.showAxis("bottom")
+        pi.setLabel("left", "Voltage", units="V", labelStyle={"color": "#dddddd", "font-size": "11px"})
+        pi.setLabel("bottom", "Time", labelStyle={"color": "#dddddd", "font-size": "11px"})
+        left_axis = pi.getAxis("left")
+        bottom_axis = pi.getAxis("bottom")
+        left_axis.setWidth(45)
+        bottom_axis.setHeight(45)
+        left_axis.setPen(pg.mkPen("#888888"))
+        left_axis.setTextPen("#ffffff")
+        left_axis.setStyle(tickTextOffset=8, tickFont=QFont("Arial", 10))
+        bottom_axis.setPen(pg.mkPen("#888888"))
+        bottom_axis.setTextPen("#ffffff")
+        bottom_axis.setStyle(tickTextOffset=8, tickFont=QFont("Arial", 10))
+        self._time_axis.enableAutoSIPrefix(False)
         pi.setMenuEnabled(False)
         self._plot_widget.setMouseEnabled(x=False, y=False)
         self._update_yrange()
@@ -192,7 +240,7 @@ class ScopeWindow(QMainWindow):
         active = self._controls.get_active_channels()
         active_vscales = [vscales_dict[ch] for ch in active]
         yrange = _yrange_for(active_vscales)
-        self._plot_widget.setYRange(-yrange, yrange, padding=0)
+        self._plot_widget.setYRange(-yrange, yrange, padding=0.05)
         self._rebuild_h_grid(yrange)
         self._ch_margin.set_yrange(yrange)
 
@@ -346,6 +394,7 @@ class ScopeWindow(QMainWindow):
         ns_per_div = self._controls.get_ns_per_div()
         old_display_samples = self._display_samples
         self._display_samples, samples_per_div = self._compute_display_geometry(frame_size, ns_per_div)
+        self._time_axis.set_timebase(ns_per_div, samples_per_div)
         log.info("_init_buffer: ns/div=%d frame_size=%d -> display_samples=%d samples_per_div=%.2f (was display=%d)",
                  ns_per_div, frame_size, self._display_samples, samples_per_div, old_display_samples)
         is_first_init = self._frame_size == 0
