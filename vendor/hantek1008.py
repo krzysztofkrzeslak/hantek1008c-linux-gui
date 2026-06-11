@@ -119,7 +119,7 @@ class Hantek1008Raw:
         self.__trigger_level_lock = Lock()
 
         self._free_run: bool = False  # free-run / untriggered display (device auto-fires)
-        self._single_mode: bool = False  # single-shot: free-run preview but report the real trigger
+        self._single_mode: bool = False  # single-shot: wait for one real trigger, then freeze
         self.last_capture_triggered: bool = False  # True if the last burst was a natural trigger
 
     def set_free_run(self, enabled: bool) -> None:
@@ -127,7 +127,7 @@ class Hantek1008Raw:
         self._free_run = enabled
 
     def set_single_mode(self, enabled: bool) -> None:
-        """Single-shot capture: free-run preview that still reports when a real trigger fires."""
+        """Single-shot capture: wait for one genuine trigger edge, then freeze on it."""
         self._single_mode = enabled
 
     def connect(self) -> None:
@@ -222,6 +222,23 @@ class Hantek1008Raw:
         log.debug("c6%02x got %d bytes (trimmed from %d)", parameter, sample_length, len(samples))
         return samples[0:sample_length]
 
+    __A55A_POLL_PERIOD_S = 0.02
+    __A55A_TIME_DIVS = 10
+
+    def __trigger_poll_budget(self) -> Tuple[int, int]:
+        """Return (attempts, force_after) scaled to the current time-base.
+
+        The device can't freeze its buffer until it has acquired a full frame
+        (ns_per_div * 10 divs of real time). At >=50ms/div that is 0.5-2s, so a
+        fixed budget makes Normal time out and Auto/Single force-fire before any
+        real edge can land. Both must scale with the frame duration.
+        """
+        frame_span_s = max(0.005, (self.__ns_per_div * self.__A55A_TIME_DIVS) / 1e9)
+        frame_polls = math.ceil(frame_span_s / self.__A55A_POLL_PERIOD_S)
+        force_after = max(7, frame_polls + 3)
+        attempts = max(force_after + 20, frame_polls * 2 + 20)
+        return attempts, force_after
+
     def __send_a55a_command(self, attempts: int=20, force_after: Optional[int]=None,
                             catch_natural: bool=False) -> bool:
         """Poll until the capture buffer freezes.
@@ -254,7 +271,7 @@ class Hantek1008Raw:
                               i + 1, self.__ns_per_div)
                     return True   # single mode: real trigger before the force
                 # auto mode: ignore natural triggers, keep polling until the force
-            sleep(0.02)
+            sleep(self.__A55A_POLL_PERIOD_S)
             self.__send_ping()
         log.warning("a55a never fired, responses=%s (ns/div=%d)",
                     responses, self.__ns_per_div)
@@ -502,16 +519,26 @@ class Hantek1008Raw:
         # buffer tears the c602/c603 halves. Free-run forces the capture with
         # c2 after a few polls so the frame slides freely with no trigger.
         if self._single_mode:
-            self.last_capture_triggered = self.__send_a55a_command(
-                attempts=200, force_after=7, catch_natural=True)
+            # Single-shot: wait for a *genuine* trigger and never force-fire.
+            # Using force_after here created a race — once the c2 force was sent
+            # the device could no longer distinguish a natural freeze from the
+            # forced one, so any edge landing at/after force_after was reported
+            # untriggered and the GUI failed to freeze. Polling like Normal (no
+            # force, RuntimeError -> retry in the acquisition loop) makes the
+            # capture report True on the first real edge every time, so the GUI
+            # freezes reliably.
+            attempts, _ = self.__trigger_poll_budget()
+            self.last_capture_triggered = self.__send_a55a_command(attempts=attempts)
         elif self._free_run:
             # Auto: align to a real trigger when one fires (so the trace falls
             # under the marker at every timescale), and only force-fire with c2
             # as a timeout fallback so the display still updates with no edge.
+            attempts, force_after = self.__trigger_poll_budget()
             self.last_capture_triggered = self.__send_a55a_command(
-                attempts=200, force_after=7, catch_natural=True)
+                attempts=attempts, force_after=force_after, catch_natural=True)
         else:
-            self.last_capture_triggered = self.__send_a55a_command(attempts=20)
+            attempts, _ = self.__trigger_poll_budget()
+            self.last_capture_triggered = self.__send_a55a_command(attempts=attempts)
 
         sample_response = self.__send_c6_a6_command(0x02)
         sample_response += self.__send_c6_a6_command(0x03)
@@ -570,6 +597,14 @@ class Hantek1008Raw:
     # to follow the user's H-trigger marker — same mechanism as fast-fixed mode.
     # Windows varies A at 200µs (we've observed 64, 1440), but with our
     # software-slide display, fixing A=4000 is simpler and equally functional.
+    # Very-slow timebases (>=50ms/div): unlike 200µs the device does NOT clamp to
+    # its rate floor here — a3 sets a genuinely slow sample clock so the 4000-short
+    # buffer spans the full 10-div window (e.g. 2s at 200ms/div). A 3-position
+    # USBpcap of the vendor app shows trigger position is encoded entirely in A
+    # (A = 2*pre_samples, sweeping 0..8000) with B1=B2=1 held constant — the
+    # opposite of the 200µs path, which pins A and positions via the B1/B2 split.
+    # These timebases are handled by the dedicated A-positioned branch below.
+    _A_POSITIONED_NS = {50_000_000, 100_000_000, 200_000_000}
     _SLOW_BURST_B_SUM_OVERRIDES = {200_000: 1402}
     _SLOW_BURST_A_OVERRIDES = {200_000: 4000}
 
@@ -614,6 +649,18 @@ class Hantek1008Raw:
         n_ch = max(1, len(self.__active_channels))
         max_pre = 4000 // n_ch          # samples per channel the hardware can buffer
         capped = min(pre_samples, max_pre)
+        if self.__ns_per_div in Hantek1008Raw._A_POSITIONED_NS:
+            # Very-slow timebases: position the trigger via A (= 2*pre_samples,
+            # event lands at buffer index pre_samples) with B1=B2=1 held constant,
+            # matching the vendor. The full buffer spans the labeled window, so
+            # the GUI renders samples 0..frame_size and the event aligns under the
+            # H-trigger marker without any software slide.
+            A = max(0, min(2 * max_pre, 2 * capped))
+            B1 = B2 = 1
+            payload = A.to_bytes(2, 'big') + B1.to_bytes(3, 'big') + B2.to_bytes(3, 'big')
+            log.info("AC[a-positioned] ns/div=%d pre_req=%d n_ch=%d A=%d B1=%d B2=%d -> payload=%s",
+                     self.__ns_per_div, pre_samples, n_ch, A, B1, B2, payload.hex())
+            return payload
         B_SUM = Hantek1008Raw._slow_burst_b_sum(self.__ns_per_div)
         if self.__ns_per_div in Hantek1008Raw._SLOW_BURST_A_OVERRIDES:
             # Device-required fixed buffer size for this time-base. Trigger
