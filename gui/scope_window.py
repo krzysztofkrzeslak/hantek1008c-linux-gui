@@ -690,10 +690,15 @@ class ScopeWindow(QMainWindow):
                 (ns_per_div * TIME_DIVS) / self._frame_size,
                 SLOW_BURST_NS_PER_SAMPLE,
             )
+        ref_ch = self._controls.get_autoset_ref_channel()
+        if ref_ch is not None:
+            candidates = {k: v for k, v in self._last_frame_np.items() if k == ref_ch}
+        else:
+            candidates = self._last_frame_np
         periods = [
             p for p in (
                 _estimate_period_ns(samples, ns_per_sample)
-                for samples in self._last_frame_np.values()
+                for samples in candidates.values()
             )
             if p is not None
         ]

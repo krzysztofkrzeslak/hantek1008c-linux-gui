@@ -131,6 +131,11 @@ class ControlsPanel(QWidget):
         self._time_combo.currentIndexChanged.connect(self._on_time_div)
         layout.addWidget(self._time_combo)
 
+        autoset_row = QWidget()
+        autoset_row.setStyleSheet("background-color: transparent;")
+        autoset_layout = QHBoxLayout(autoset_row)
+        autoset_layout.setContentsMargins(0, 0, 0, 0)
+        autoset_layout.setSpacing(4)
         self._autoset_btn = QPushButton("AUTO")
         self._autoset_btn.setStyleSheet(
             "background-color: #1a3a5c; color: #88aaff; border: 1px solid #335577; "
@@ -138,7 +143,15 @@ class ControlsPanel(QWidget):
         )
         self._autoset_btn.setToolTip("Auto-detect signal frequency and set timebase")
         self._autoset_btn.clicked.connect(self.autoset_requested)
-        layout.addWidget(self._autoset_btn)
+        autoset_layout.addWidget(self._autoset_btn)
+        self._autoset_ref_combo = QComboBox()
+        self._autoset_ref_combo.setStyleSheet(_COMBO_STYLE)
+        self._autoset_ref_combo.setToolTip("Reference channel for AutoSet detection")
+        self._autoset_ref_combo.addItem("->Ref: All", None)
+        for i in range(8):
+            self._autoset_ref_combo.addItem(f"->Ref: CH{i + 1}", i)
+        autoset_layout.addWidget(self._autoset_ref_combo)
+        layout.addWidget(autoset_row)
 
         self._spinner_idx = 0
         self._spinner_timer = QTimer(self)
@@ -387,3 +400,7 @@ class ControlsPanel(QWidget):
     def _on_spinner_tick(self):
         self._spinner_idx = (self._spinner_idx + 1) % len(self._SPINNER_FRAMES)
         self._autoset_btn.setText(self._SPINNER_FRAMES[self._spinner_idx])
+
+    def get_autoset_ref_channel(self):
+        """Return the channel index (0-7) to use as AutoSet reference, or None for all channels."""
+        return self._autoset_ref_combo.currentData()
